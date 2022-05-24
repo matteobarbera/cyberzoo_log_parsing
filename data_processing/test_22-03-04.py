@@ -11,4 +11,7 @@ if __name__ == "__main__":
     # plot_distance_from_origin(lat_force_f)
     plot_distance_from_origin(take_files[:-2])
 
+    intervals = [(4, 11), (8, 20), (0, 20), (0, 20)]
+    plot_bearing(take_files[:-2], intervals=intervals, phase=[0, 0, 90, 180])
+
     plt.show()

@@ -1,5 +1,6 @@
 import os
 from itertools import cycle
+from functools import wraps
 
 
 import numpy as np
@@ -13,6 +14,52 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import pickle
 from csv import reader
+import seaborn as sns
+
+
+def seaborn_style():
+
+    def decorator(func):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if "context" in kwargs.keys():
+                _context = kwargs["context"]
+                del kwargs["context"]
+            else:
+                _context = "notebook"
+
+            if "style" in kwargs.keys():
+                _style = kwargs["style"]
+                del kwargs["style"]
+            else:
+                _style = "whitegrid"
+
+            if "params" in kwargs.keys():
+                _params = kwargs["params"]
+                del kwargs["params"]
+            else:
+                _params = None
+
+            _default_params = {
+              # "xtick.bottom": True,
+              # "ytick.left": True,
+              # "xtick.color": ".8",  # light gray
+              # "ytick.color": ".15",  # dark gray
+              "axes.spines.left": False,
+              "axes.spines.bottom": False,
+              "axes.spines.right": False,
+              "axes.spines.top": False,
+              }
+            if _params is not None:
+                merged_params = {**_params, **_default_params}
+            else:
+                merged_params = _default_params
+            with sns.plotting_context(context=_context), sns.axes_style(style=_style, rc=merged_params):
+                func(*args, **kwargs)
+        return wrapper
+
+    return decorator
 
 
 def get_all_files(directory: str):
@@ -31,7 +78,7 @@ def get_csv_cols(filename):
             if i == 3:
                 cols = []
                 for j, col_name in enumerate(line):
-                    if col_name == "RigidBody 1":
+                    if col_name == "RigidBody 1" or col_name == "testbed 1":
                         cols.append(j)
                 return cols
 
@@ -89,6 +136,28 @@ def my_quaternion_to_euler(q):
     theta = np.arcsin(2 * (q0 * q2 - q3 * q1))
     psi = np.arctan2(2 * (q0 * q3 + q1 * q2), 1 - 2 * (q2 ** 2 + q3 ** 2))
     return np.c_[phi, theta, psi]
+
+
+def mean_angle_estimation(phi: np.ndarray):
+    x = np.cos(phi)
+    y = np.sin(phi)
+    n = phi.size
+
+    x_bar = np.sum(x) / (1 / n)
+    y_bar = np.sum(y) / (1 / n)
+
+    if x_bar > 0:
+        phi_bar = np.arctan(y_bar / x_bar)
+    elif x_bar < 0:
+        phi_bar = np.arctan(y_bar / x_bar) + np.pi
+    elif x_bar == 0 and y_bar > 0:
+        phi_bar = np.pi / 2
+    elif x_bar == 0 and y_bar < 0:
+        phi_bar = 3 / 2 * np.pi
+    else:
+        raise ValueError("Mean angle undefined")
+
+    return phi_bar % (2 * np.pi)
 
 
 def plot_euler(take_files: list, steady_state: bool = False):
@@ -282,10 +351,10 @@ def animate_attitude(data: dict, hz: float = 2):
         f.write(soup.prettify())
 
 
-def position_cardinal_2d(take_files: list, s_start: float = None, s_end: float = None, last_secs: float = None, use_cmaps: bool = False):
+def position_cardinal_2d(take_files: list, s_start: float = None, s_end: float = None, last_secs: float = None, use_cmaps: bool = False, colorbar: bool = True):
     plt.figure()
-    cmaps = ["autumn", "winter", "cool", "copper"]
-    for take, cmap in zip(take_files, cmaps):
+    cmaps = cycle(["autumn", "winter", "cool", "copper", "summer"])
+    for take in take_files:
         data = extract_take_data(take)
 
         t_arr = data["Time"]
@@ -302,15 +371,16 @@ def position_cardinal_2d(take_files: list, s_start: float = None, s_end: float =
             _last_secs = len(t_arr) - int(last_secs * (1 / dt))
 
         if use_cmaps:
-            mappable = cm.ScalarMappable(cmap=cmap)
+            mappable = cm.ScalarMappable(cmap=next(cmaps))
         else:
             mappable = cm.ScalarMappable(cmap=cm.inferno)
         mappable.set_array(t_arr[mask][_last_secs:])
 
         x, y, z = np.hsplit(data["Position"], 3)  # split array by column
 
-        plt.scatter(x[mask][_last_secs:], y[mask][_last_secs:], cmap=mappable.cmap, c=mappable.get_array())
-        plt.colorbar(mappable, label="Time [s]")
+        plt.scatter(x[mask][_last_secs:], y[mask][_last_secs:], cmap=mappable.cmap, c=mappable.get_array(), alpha=0.7)
+        if colorbar:
+            plt.colorbar(mappable, label="Time [s]")
     plt.xlabel("X [mm]")
     plt.ylabel("Y [mm]")
     plt.grid()
@@ -349,6 +419,55 @@ def position_cardinal_3d(take_files: list, last_secs: float = None, z_pos_up: bo
     ax.grid()
 
     plt.tight_layout()
+
+
+@seaborn_style()
+def plot_bearing(take_files: list, *, intervals: list = None, phase: list = None, title: str = "", origin: list = (0, 0)):
+    if not isinstance(take_files, list):
+        take_files = [take_files]
+    if intervals is not None:
+        assert len(take_files) == len(intervals)
+    if phase is not None:
+        assert len(take_files) == len(phase)
+
+    fig = plt.figure()
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    r_arc = np.linspace(0.5, 0.8, num=len(take_files))
+    for i, take in enumerate(take_files):
+        data = extract_take_data(take)
+
+        t_arr = data["Time"]
+        if intervals is not None:
+            s_start, s_end = intervals[i]
+        else:
+            s_start = t_arr[0]
+            s_end = t_arr[-1]
+        mask = (t_arr > s_start) & (t_arr < s_end)
+        t_arr = t_arr[mask] - s_start
+        if intervals is not None:
+            t_arr /= (s_end - s_start)
+
+        x, y, _ = np.hsplit(data["Position"], 3)  # split array by column
+
+        theta = np.mod(np.arctan2(y - origin[1], x - origin[0]) + 2 * np.pi, 2 * np.pi)[mask]
+        avg_theta = mean_angle_estimation(theta)
+
+        ax = fig.add_subplot(111, projection="polar")
+        ax.plot(theta, t_arr, alpha=0.35, lw=3)
+        ax.plot(np.repeat(avg_theta, len(t_arr)), t_arr, color=colors[i % len(colors)], ls="--", lw=3, alpha=0.9)
+        ax.set_xticks(np.radians(np.arange(0, 360, 15)))
+        if phase is not None:
+            _phase = np.radians(phase[i])
+            advance_angle = avg_theta - _phase
+            aa_arr = np.arange(_phase, avg_theta, 0.01)
+            ax.plot(np.repeat(_phase, len(t_arr)), t_arr, color=colors[i % len(colors)], ls="--")
+            ax.plot(aa_arr, np.repeat(r_arc[i], aa_arr.size), color=colors[i % len(colors)],
+                    label=f"{int(np.degrees(advance_angle))} deg", lw=3, alpha=0.8)
+        if intervals is not None:
+            ax.set_rmax(1)
+        ax.legend()
+        ax.set_title(title)
+        ax.set_rlabel_position(-22)
 
 
 def make_table(csv_file: str):
@@ -462,7 +581,7 @@ def dist_computations(points, origin, position_history=None, weight=1.1):
     print(f"Approximate advance angle: {round(adv_angle, 1)} deg")
 
 
-def plot_distance_from_origin(take_files: list, origin: tuple = (-304, 25)):
+def plot_distance_from_origin(take_files: list, origin: tuple = (-30, 260)):
     if not isinstance(take_files, list):
         take_files = [take_files]
 
@@ -476,7 +595,7 @@ def plot_distance_from_origin(take_files: list, origin: tuple = (-304, 25)):
         ts = data["Time"]
         plt.plot(ts, distance, label=t)
 
-    plt.legend()
+    # plt.legend()
     plt.xlabel("Time [s]")
     plt.ylabel("Distance [mm]")
     plt.grid()
